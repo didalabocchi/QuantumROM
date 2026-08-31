@@ -1132,7 +1132,7 @@ PATCH_BT_LIB() {
     if [ "$PATCHED" -eq 0 ]; then
         echo -e "- No known Bluetooth patch pattern matched."
         rm -rf "$BT_LIB_FILE"
-        return 1
+        return 0
     fi
 
     return 0
