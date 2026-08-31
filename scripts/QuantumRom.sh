@@ -535,7 +535,7 @@ DISABLE_FBE() {
     fi
 
     if [ ! -d "${EXTRACTED_FIRM_DIR}/vendor/etc" ]; then
-        return 1
+        return 0
     fi
 
     local fstab_files=$(grep -lr 'fileencryption' "${EXTRACTED_FIRM_DIR}/vendor/etc" 2>/dev/null)
