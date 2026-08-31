@@ -1121,7 +1121,7 @@ PATCH_BT_LIB() {
 
             echo -e "- Found Bluetooth patch pattern [$idx]"
 
-            HEX_PATCH "$BT_LIB_FILE" "$from" "$to" || return 1
+            HEX_PATCH "$BT_LIB_FILE" "$from" "$to" || true
 
             PATCHED=1
             mv -f "$BT_LIB_FILE" "${EXTRACTED_FIRM_DIR}/system/system/lib64/"
