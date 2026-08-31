@@ -1056,7 +1056,7 @@ PATCH_BT_LIB() {
     # Get libbluetooth_jni.so
     if ! ls "$EXTRACTED_FIRM_DIR"/system/system/apex/com.android.bt*.apex >/dev/null 2>&1; then
         echo -e "- No bluetooth apex file found."
-        return 1
+        return 0
     fi
 
     7z e "${EXTRACTED_FIRM_DIR}/system/system/apex/com.android.bt"*.apex \
