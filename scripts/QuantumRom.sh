@@ -2,7 +2,6 @@
 
 ###################################################################################################
 
-REAL_USER=${SUDO_USER:-$USER}
 
 # QT DIR
 QT_DIR="$(pwd)"
@@ -132,19 +131,19 @@ GET_PROP() {
             ;;
         *)
             echo -e "Unknown partition: $PARTITION"
-            return 1
+            return 0
             ;;
     esac
 
     if [ ! -f "$FILE" ]; then
         echo -e "- File not found: $FILE"
-        return 1
+        return 0
     fi
 
     local VALUE=$(grep -m1 "^${PROP}=" "$FILE" | cut -d'=' -f2-)
 
     if [ -z "$VALUE" ]; then
-        return 1
+        return 0
     fi
 
     echo -e "$VALUE"
@@ -350,7 +349,7 @@ EXTRACT_SUPER_IMG() {
         echo -e "- super.img extraction complete"
 
     else
-        echo -e "- No super.img found."
+        echo -e "No super.img found."
     fi
 }
 
@@ -430,7 +429,7 @@ EXTRACT_FIRMWARE_IMG() {
 
     if ! ls "$EXTRACTED_FIRM_DIR"/*.img >/dev/null 2>&1; then
         echo -e "No .img files found in: $EXTRACTED_FIRM_DIR"
-        return 1
+        return 0
     fi
 
     echo -e "Extracting images from: $EXTRACTED_FIRM_DIR"
@@ -515,13 +514,12 @@ EXTRACT_FIRMWARE_IMG() {
 
         if [ ! -f "$TARGET_IMG" ]; then
             echo -e "- Image not found: $TARGET_IMG"
-            return 1
+            return 0
         fi
 
         extract_img "$TARGET_IMG"
     fi
 
-    chown -R "$REAL_USER:$REAL_USER" "$EXTRACTED_FIRM_DIR"
     chmod -R u+rwX "$EXTRACTED_FIRM_DIR"
 }
 
@@ -591,7 +589,7 @@ INSTALL_FRAMEWORK() {
 
 	if [ ! -f "$framework_apk" ]; then
         echo -e "- File not found: $framework_apk"
-        return 1
+        return 0
     fi
 
     java -jar "$APKTOOL" install-framework "$framework_apk"
@@ -655,7 +653,7 @@ RECOMPILE() {
 
 	if [ ! -d "$DECOMPILED_DIR" ]; then
         echo "- Directory not found: $DECOMPILED_DIR"
-        return 1
+        return 0
     fi
 
     local org_file_name=$(awk '/^apkFileName:/ {print $2}' "$DECOMPILED_DIR/apktool.yml")
@@ -717,11 +715,11 @@ HEX_PATCH() {
     local FROM="$(echo -e "$2" | tr '[:upper:]' '[:lower:]')"
     local TO="$(echo -e "$3" | tr '[:upper:]' '[:lower:]')"
 
-    [ ! -f "$FILE" ] && { echo -e "File not found: $FILE"; return 1; }
+    [ ! -f "$FILE" ] && { echo -e "- File not found: $FILE"; return 0; }
 
     xxd -p -c 0 "$FILE" | grep -q "$FROM" || {
         echo -e "- Pattern not found: $FROM"
-        return 1
+        return 0
     }
 
     echo -e "- Patching: $FILE"
@@ -739,7 +737,7 @@ HEX_PATCH() {
 
     echo -e "- Patch failed, restoring backup"
     mv "$FILE.bak" "$FILE"
-    return 1
+    return 0
 }
 
 
@@ -1142,28 +1140,76 @@ PATCH_BT_LIB() {
 FIX_VNDK() {
     echo " "
 
-	if [ "$#" -ne 1 ]; then
+    if [ "$#" -ne 1 ]; then
         echo -e "Usage: ${FUNCNAME[0]} <EXTRACTED_FIRM_DIRECTORY>"
         return 1
     fi
 
-	local EXTRACTED_FIRM_DIR="$1"
-	local TARGET_ROM_SYSTEM_EXT_DIR="$(GET_SYSTEM_EXT_DIR "$EXTRACTED_FIRM_DIR")"
+    local EXTRACTED_FIRM_DIR="$1"
+    local TARGET_ROM_SYSTEM_EXT_DIR="$(GET_SYSTEM_EXT_DIR "$EXTRACTED_FIRM_DIR")"
 
-    echo -e "Checking $STOCK_DEVICE and $TARGET_DEVICE vndk version."
+    echo "Checking $STOCK_DEVICE and $TARGET_DEVICE VNDK version."
+
     local SDK="$(GET_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.build.version.sdk_full")"
+    local ANDROID_VERSION="$(GET_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.system.build.version.release")"
 
     if [[ -z "$SDK" ]]; then
-        local SDK="$(GET_PROP "$EXTRACTED_FIRM_DIR" "system" ro.build.version.sdk)"
+        SDK="$(GET_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.build.version.sdk")"
     fi
 
-	echo "- Target rom SDK version: $SDK"
+    echo "- Target rom Android version: $ANDROID_VERSION - SDK version: $SDK"
+
     if [ -f "${TARGET_ROM_SYSTEM_EXT_DIR}/apex/com.android.vndk.v${STOCK_VNDK_VERSION}.apex" ]; then
-        echo -e "- VNDK matched. ${TARGET_ROM_SYSTEM_EXT_DIR}/apex/com.android.vndk.v${STOCK_VNDK_VERSION}.apex"
+        echo "- VNDK matched: ${TARGET_ROM_SYSTEM_EXT_DIR}/apex/com.android.vndk.v${STOCK_VNDK_VERSION}.apex"
+        return 0
+    fi
+
+    echo "- VNDK mismatch. Adding SDK $SDK com.android.vndk.v${STOCK_VNDK_VERSION}.apex"
+
+    rm -rf "${TARGET_ROM_SYSTEM_EXT_DIR}/apex/"com.android.vndk.v*.apex
+
+    local VNDK_ZIP="Android-${ANDROID_VERSION}_SDK-${SDK}.zip"
+    local VNDK_URL="https://github.com/SN-Abdullah-Al-Noman/QuantumROM/releases/download/VNDKS/${VNDK_ZIP}"
+    local VNDK_DIR="$(pwd)/QuantumROM/vndks"
+    local VNDK_ZIP_PATH="${VNDK_DIR}/${VNDK_ZIP}"
+    local VNDK_EXTRACT_DIR="${VNDK_DIR}/Android-${ANDROID_VERSION}_SDK-${SDK}"
+
+    mkdir -p "$VNDK_DIR"
+
+    if curl -fsSL \
+        "https://api.github.com/repos/SN-Abdullah-Al-Noman/QuantumROM/releases/tags/VNDKS" |
+        jq -e --arg dev "$VNDK_ZIP" '.assets[].name == $dev' |
+        grep -q true; then
+        echo "- $VNDK_ZIP found"
     else
-        echo -e "- VNDK mismatch. Adding SDK $SDK com.android.vndk.v${STOCK_VNDK_VERSION}.apex"
-        rm -rf "${TARGET_ROM_SYSTEM_EXT_DIR}/apex/"com.android.vndk.v*.apex
-        7z x -aoa "$VNDKS_COLLECTION/$SDK/${STOCK_VNDK_VERSION}.zip" -o"${TARGET_ROM_SYSTEM_EXT_DIR}/"
+        echo "- $VNDK_ZIP not found"
+        exit 1
+    fi
+
+    if curl -fsSL --connect-timeout 5 https://www.google.com >/dev/null; then
+        echo "- Downloading $VNDK_ZIP"
+        if wget -q --no-check-certificate -O "$VNDK_ZIP_PATH" "$VNDK_URL"; then
+            if 7z x -aoa -y -bd -bso0 -bse0 -bsp1 "$VNDK_ZIP_PATH" -o"$VNDK_EXTRACT_DIR"; then
+                if [ -d "${VNDK_EXTRACT_DIR}/${STOCK_VNDK_VERSION}" ]; then
+                    cp -a "${VNDK_EXTRACT_DIR}/${STOCK_VNDK_VERSION}/." \
+                        "$TARGET_ROM_SYSTEM_EXT_DIR/"
+                    echo "- VNDK $STOCK_VNDK_VERSION copied successfully"
+                else
+                    echo "- ERROR: Extracted VNDK directory not found:"
+                    echo "  ${VNDK_EXTRACT_DIR}/${STOCK_VNDK_VERSION}"
+                    return 1
+                fi
+            else
+                echo "- ERROR: Failed to extract $VNDK_ZIP"
+                exit 1
+            fi
+        else
+            echo "- ERROR: Failed to download $VNDK_ZIP"
+            exit 1
+        fi
+    else
+        echo "- ERROR: Internet connection unavailable"
+        exit 1
     fi
 }
 
@@ -1702,12 +1748,6 @@ REMOVE_CAMERA_FILES() {
 
     rm -rf "${EXTRACTED_FIRM_DIR}/system/system/priv-app/SamsungCamera"
     rm -rf "${EXTRACTED_FIRM_DIR}/system/system/cameradata"
-
-    local FIRST_CAM_LINE="$(
-        grep -n '^    <SEC_FLOATING_FEATURE_CAMERA' \
-        "${EXTRACTED_FIRM_DIR}/system/system/etc/floating_feature.xml" |
-        head -n 1 | cut -d: -f1
-    )"
 }
 
 
@@ -1749,7 +1789,7 @@ FIX_CAMERA() {
 
         if [ ! -f "$(pwd)/QuantumROM/Mods/Apps/MTK_Camera_Files_Android_${ANDROID_VERSION}.zip" ]; then
             if curl -fsSL --connect-timeout 5 https://www.google.com >/dev/null; then
-                wget --no-check-certificate \
+                wget -q --no-check-certificate\
                     "https://github.com/SN-Abdullah-Al-Noman/Samsung_Special/releases/download/Android_${ANDROID_VERSION}/MTK_Camera_Files_Android_${ANDROID_VERSION}.zip" \
                     -O "$(pwd)/QuantumROM/Mods/Apps/MTK_Camera_Files_Android_${ANDROID_VERSION}.zip"
             else
@@ -1767,10 +1807,9 @@ FIX_CAMERA() {
                 -d "$(pwd)/QuantumROM/Mods/Apps/MTK_Camera_Files_Android_${ANDROID_VERSION}" \
                 >/dev/null 2>&1
 
-            sed -i \
-                "$((FIRST_CAM_LINE-1))r $(pwd)/QuantumROM/Mods/Apps/MTK_Camera_Files_Android_${ANDROID_VERSION}/system/etc/floating_feature.xml" \
-                "${EXTRACTED_FIRM_DIR}/system/system/etc/floating_feature.xml"
-
+            local FIRST_CAM_LINE="$(grep -n '^    <SEC_FLOATING_FEATURE_CAMERA' "${EXTRACTED_FIRM_DIR}/system/system/etc/floating_feature.xml" | head -n 1 | cut -d: -f1)"
+            sed -i '/^    <SEC_FLOATING_FEATURE_CAMERA/d' "${EXTRACTED_FIRM_DIR}/system/system/etc/floating_feature.xml"
+            sed -i "$((FIRST_CAM_LINE-1))r $(pwd)/QuantumROM/Mods/Apps/MTK_Camera_Files_Android_${ANDROID_VERSION}/system/etc/floating_feature.xml" "${EXTRACTED_FIRM_DIR}/system/system/etc/floating_feature.xml"
 			rm -rf "$(pwd)/QuantumROM/Mods/Apps/MTK_Camera_Files_Android_${ANDROID_VERSION}/system/etc/floating_feature.xml"
 
             echo "- Copying A34 mediatek camera related files."
@@ -1941,7 +1980,7 @@ BUILD_PROP() {
             ;;
         *)
             echo -e "Unknown partition: $PARTITION"
-            return 1
+            return 0
             ;;
     esac
 
@@ -2038,7 +2077,7 @@ APPLY_JDM_SPECIAL() {
 
 	if [ ! -f "$(pwd)/QuantumROM/Mods/Apps/JDM_Camera_Files_Android_${ANDROID_VERSION}.zip" ]; then
 		if curl -fsSL --connect-timeout 5 https://www.google.com >/dev/null; then
-            wget --no-check-certificate \
+            wget -q --no-check-certificate\
                 "https://github.com/SN-Abdullah-Al-Noman/Samsung_Special/releases/download/Android_${ANDROID_VERSION}/JDM_Camera_Files_Android_${ANDROID_VERSION}.zip" \
                 -O "$(pwd)/QuantumROM/Mods/Apps/JDM_Camera_Files_Android_${ANDROID_VERSION}.zip"
         else
@@ -2079,12 +2118,12 @@ ADD_CHINA_SMART_MANAGER() {
 	
     if [ "$PRODUCT_BRAND" != "samsung" ]; then
 	     echo "- Unsupported Android product: $PRODUCT_BRAND"
-        return 1
+        return 0
     fi
 
     if [[ ! "$ANDROID_VERSION" =~ ^(14|15|16)$ ]]; then
         echo "- Unsupported Android version: $ANDROID_VERSION"
-        return 1
+        return 0
     fi
 
 	if [ -f "${EXTRACTED_FIRM_DIR}/system/system/etc/floating_feature.xml" ]; then
@@ -2101,7 +2140,7 @@ ADD_CHINA_SMART_MANAGER() {
         [ ! -f "$(pwd)/QuantumROM/Mods/Apps/Samsung_SmartManagerCN_Android_${ANDROID_VERSION}.zip" ]; then
 
         if curl -fsSL --connect-timeout 5 https://www.google.com >/dev/null; then
-            wget --no-check-certificate \
+            wget -q --no-check-certificate\
                 "https://github.com/SN-Abdullah-Al-Noman/Samsung_Special/releases/download/Android_${ANDROID_VERSION}/Samsung_SmartManagerCN_Android_${ANDROID_VERSION}.zip" \
                 -O "$(pwd)/QuantumROM/Mods/Apps/Samsung_SmartManagerCN_Android_${ANDROID_VERSION}.zip"
         else
@@ -2129,7 +2168,6 @@ ADD_CHINA_SMART_MANAGER() {
             "com.samsung.android.sm_cn"
     fi
 
-    chown -R "$REAL_USER:$REAL_USER" "$EXTRACTED_FIRM_DIR"
     chmod -R u+rwX "$EXTRACTED_FIRM_DIR"
 }
 
@@ -2179,7 +2217,7 @@ ADD_SAMSUNG_FLAGSHIP_APPS() {
         [ ! -f "$(pwd)/QuantumROM/Mods/Apps/Samsung_PhotoEditor_AIFull_Android_${ANDROID_VERSION}.zip" ]; then
 
         if curl -fsSL --connect-timeout 5 https://www.google.com >/dev/null; then
-            wget --no-check-certificate \
+            wget -q --no-check-certificate\
                 "https://github.com/SN-Abdullah-Al-Noman/Samsung_Special/releases/download/Android_${ANDROID_VERSION}/Samsung_PhotoEditor_AIFull_Android_${ANDROID_VERSION}.zip" \
                 -O "$(pwd)/QuantumROM/Mods/Apps/Samsung_PhotoEditor_AIFull_Android_${ANDROID_VERSION}.zip"
         else
@@ -2232,7 +2270,7 @@ ADD_SAMSUNG_FLAGSHIP_APPS() {
         [ ! -f "$(pwd)/QuantumROM/Mods/Apps/Samsung_OCRDataProvider_Android_${ANDROID_VERSION}.zip" ]; then
 
 		if curl -fsSL --connect-timeout 5 https://www.google.com >/dev/null; then
-            wget --no-check-certificate \
+            wget -q --no-check-certificate\
                 "https://github.com/SN-Abdullah-Al-Noman/Samsung_Special/releases/download/Android_${ANDROID_VERSION}/Samsung_OCRDataProvider_Android_${ANDROID_VERSION}.zip" \
                 -O "$(pwd)/QuantumROM/Mods/Apps/Samsung_OCRDataProvider_Android_${ANDROID_VERSION}.zip"
         else
@@ -2264,7 +2302,7 @@ ADD_SAMSUNG_FLAGSHIP_APPS() {
 
     if [ ! -f "$(pwd)/QuantumROM/Mods/Apps/Samsung_Important_Apps_Android_${ANDROID_VERSION}.zip" ]; then
         if curl -fsSL --connect-timeout 5 https://www.google.com >/dev/null; then
-            wget --no-check-certificate \
+            wget -q --no-check-certificate\
                 "https://github.com/SN-Abdullah-Al-Noman/Samsung_Special/releases/download/Android_${ANDROID_VERSION}/Samsung_Important_Apps_Android_${ANDROID_VERSION}.zip" \
                -O "$(pwd)/QuantumROM/Mods/Apps/Samsung_Important_Apps_Android_${ANDROID_VERSION}.zip"
         else
@@ -2281,7 +2319,6 @@ ADD_SAMSUNG_FLAGSHIP_APPS() {
         cp -rfa "$(pwd)/QuantumROM/Mods/Apps/Samsung_Important_Apps_Android_${ANDROID_VERSION}/." "${EXTRACTED_FIRM_DIR}/"
     fi
 
-    chown -R "$REAL_USER:$REAL_USER" "$EXTRACTED_FIRM_DIR"
     chmod -R u+rwX "$EXTRACTED_FIRM_DIR"
 }
 
@@ -2312,7 +2349,7 @@ APPLY_CUSTOM_FEATURES() {
     BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "fw.max_users" "5"
     BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "fw.show_multiuserui" "1"
     BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "wifi.interface=" "wlan0"
-    BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "wlan.wfd.hdcp" "disabled"
+    BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "wlan.wfd.hdcp" "disable"
 	BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.telephony.sim_slots.count" "2"
 	BUILD_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.surface_flinger.protected_contents" "true"
 	BUILD_PROP "$EXTRACTED_FIRM_DIR" "product" "ro.product.locale" "en-US"
@@ -2320,7 +2357,6 @@ APPLY_CUSTOM_FEATURES() {
     # Apply custom floating feature.
 	APPLY_CUSTOM_FLOATING_FEATURE "$EXTRACTED_FIRM_DIR"
 
-	chown -R "$REAL_USER:$REAL_USER" "$EXTRACTED_FIRM_DIR"
     chmod -R u+rwX "$EXTRACTED_FIRM_DIR"
 }
 
@@ -2333,7 +2369,7 @@ DECODE_OMC() {
         return 1
     fi
 
-    echo -e "Decoding CSC - odm,optics."
+    echo -e "-Decoding CSC - odm,optics."
 
     if ! command -v java >/dev/null 2>&1; then
         echo -e "- Java is not installed."
@@ -2346,7 +2382,7 @@ DECODE_OMC() {
     if [ -d "${FW_DIR}/odm/etc/omc" ]; then
         rm -rf "${OUT_DIR}/odm_decoded"
 
-        echo "Decoding odm/etc/omc in ${OUT_DIR}"
+        echo "- Decoding odm/etc/omc in ${OUT_DIR}"
 
         java -jar "$omc_decoder" \
             -i "${FW_DIR}/odm/etc/omc" \
@@ -2361,7 +2397,7 @@ DECODE_OMC() {
     if [ -d "${FW_DIR}/optics" ]; then
         rm -rf "${OUT_DIR}/optics_decoded"
 
-        echo "Decoding optics in ${OUT_DIR}"
+        echo "- Decoding optics in ${OUT_DIR}"
 
         java -jar "$omc_decoder" \
             -i "${FW_DIR}/optics" \
@@ -2672,7 +2708,6 @@ BUILD_IMG() {
         build_img "$MODE"
     fi
 
-    chown -R "$REAL_USER:$REAL_USER" "$OUT_DIR"
     chmod -R u+rwX "$OUT_DIR"
 }
 
