@@ -26,6 +26,60 @@ chmod +x "$mkfs_erofs"
 chmod +x "$make_ext4fs"
 chmod +x "$extract_erofs"
 
+source "$(pwd)/scripts/debloat.sh"
+source "$(pwd)/scripts/git_utils.sh"
+
+
+WGET_DOWNLOAD() {
+    local URL="$1"
+    local OUT_DIR="$2"
+
+    if [ -z "$URL" ] || [ -z "$OUT_DIR" ]; then
+        echo "Usage: WGET_DOWNLOAD <URL> <OUTPUT_DIRECTORY>"
+        return 1
+    fi
+
+    mkdir -p "$OUT_DIR" || {
+        echo "- Failed to create output directory:"
+        echo "    $OUT_DIR"
+        exit 1
+    }
+
+    local FILE=$(basename "${URL%%\?*}")
+    local OUT="$OUT_DIR/$FILE"
+
+    if ! wget --spider -q "$URL"; then
+        echo "- File is not downloadable:"
+        echo "    $URL"
+        exit 1
+    fi
+
+    echo "- Downloading: $FILE"
+
+    wget --no-check-certificate -q -O "$OUT" "$URL" &
+    local PID=$!
+
+    local SPINNER='|/-\'
+    local i=0
+
+    while kill -0 "$PID" 2>/dev/null; do
+        printf '\r- Downloading... %s' "${SPINNER:i++%4:1}"
+        sleep 0.2
+    done
+
+    wait "$PID"
+    local STATUS=$?
+
+    if [ "$STATUS" -ne 0 ]; then
+        echo
+        echo "- Download failed"
+        rm -f "$OUT"
+        exit 1
+    fi
+
+    printf '\r- Download completed: %s\n' "$OUT"
+}
+
 
 DOWNLOAD_FIRMWARE() {
     echo " "
@@ -42,6 +96,21 @@ DOWNLOAD_FIRMWARE() {
 
     rm -rf "$DOWN_DIR"
     mkdir -p "$DOWN_DIR"
+
+    if [ "${#CSC}" -ne 3 ]; then
+        echo "- CSC is not 3 characters"
+        echo "- Treating CSC as download URL"
+		if [[ "$CSC" =~ gofile\.io/d/([^/?]+) ]]; then
+            echo "GoFile link detected"
+            echo "Directory: ${BASH_REMATCH[1]}"
+            python3 "$(pwd)/GoFileDownloader/downloader.py" "$CSC"
+            mv "$(pwd)/Downloads/${BASH_REMATCH[1]}"/* "$DOWN_DIR"/
+			return 0
+        else
+            WGET_DOWNLOAD "$CSC" "$DOWN_DIR"
+		    return 0
+	    fi
+	fi
 
     echo -e "======================================"
     echo -e "  Samsung FW Downloader   "
@@ -218,6 +287,17 @@ EXTRACT_FIRMWARE() {
         echo -e "- Directory not found: $FIRM_DIR"
         exit
     fi
+
+# For extension less file
+for file in "$FIRM_DIR"/*; do
+    [ -f "$file" ] || continue
+
+    case "$(basename "$file")" in
+        *.*) continue ;;
+    esac
+
+    7z x -y -bd -bsp1 -o"$FIRM_DIR" "$file"
+done
 
     # ---- ZIP ----
     for file in "$FIRM_DIR"/*.zip; do
@@ -979,8 +1059,15 @@ UPDATE_SDHMS() {
     local EXTRACTED_FIRM_DIR="$1"
 
     echo "- Adding alternative SDHMS app."
-	rm -rf "${EXTRACTED_FIRM_DIR}/system/priv-app/SamsungDeviceHealthManagerService"
-	cp -a "$(pwd)/QuantumROM/Mods/Apps/SDHMS/." "${EXTRACTED_FIRM_DIR}/"
+	local SDK="$(GET_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.build.version.sdk_full")"
+    local ANDROID_VERSION="$(GET_PROP "$EXTRACTED_FIRM_DIR" "system" "ro.system.build.version.release")"
+	
+	if [ -d "$(pwd)/QuantumROM/Mods/Apps/SDHMS/${ANDROID_VERSION}/priv-app/SamsungDeviceHealthManagerService" ]; then
+	    rm -rf "${EXTRACTED_FIRM_DIR}/system/system/priv-app/SamsungDeviceHealthManagerService"
+        cp -a "$(pwd)/QuantumROM/Mods/Apps/SDHMS/${ANDROID_VERSION}/." "${EXTRACTED_FIRM_DIR}/system/system/"
+    else
+        echo "- Alternative SDHMS app for $ANDROID_VERSION not found."
+    fi
 }
 
 
@@ -1351,7 +1438,7 @@ ADJUST_SYSTEM_EXT() {
         fi
     fi
 
-    echo "- TARGET_ROM_SYSTEM_EXT_DIR set to: $TARGET_ROM_SYSTEM_EXT_DIR"
+    echo "- TARGET_ROM_SYSTEM_EXT_DIR set to: $(GET_SYSTEM_EXT_DIR "$EXTRACTED_FIRM_DIR")"
 }
 
 
@@ -1370,7 +1457,7 @@ GET_SYSTEM_EXT_DIR() {
     elif [ ! -L "${EXTRACTED_FIRM_DIR}/system/system/system_ext" ] && [ -d "${EXTRACTED_FIRM_DIR}/system/system/system_ext/etc" ]; then
         local TARGET_ROM_SYSTEM_EXT_DIR="${EXTRACTED_FIRM_DIR}/system/system/system_ext"
     else
-        return 1
+        return 0
     fi
 
     echo "$TARGET_ROM_SYSTEM_EXT_DIR"
@@ -1492,7 +1579,7 @@ APPLY_CUSTOM_FLOATING_FEATURE() {
         local TARGET_ROM_FLOATING_FEATURE="${EXTRACTED_FIRM_DIR}/vendor/etc/floating_feature.xml"
     else
         echo "- Error: floating_feature.xml not found!"
-        return 1
+        return 0
     fi
 
     #========== COMMON ==========#
@@ -1767,8 +1854,11 @@ FIX_BLUETOOTH() {
 
     if [ "$STOCK_DEVICE_CHIPSET" = "MediaTek" ] && [ "$BUILD_BRAND" != "MTK" ]; then
         echo "- Adding mediatek bluetooth apex."
-        rm -f "${EXTRACTED_FIRM_DIR}"/system/system/apex/com.android.bt*.apex
-        cp -rfa "$(pwd)/QuantumROM/MTK_SPECIAL/${SDK}/BT_APEX/system/." "${EXTRACTED_FIRM_DIR}/system/system"
+		if [ -d "$(pwd)/QuantumROM/MTK_SPECIAL/${SDK}/BT_APEX/system/apex" ]; then
+            rm -rf "${EXTRACTED_FIRM_DIR}"/system/system/apex/com.android.bt*.apex
+            cp -rfa "$(pwd)/QuantumROM/MTK_SPECIAL/${SDK}/BT_APEX/system/." \
+                "${EXTRACTED_FIRM_DIR}/system/system"
+		fi
     fi
 }
 
@@ -1788,12 +1878,15 @@ FIX_CAMERA() {
 
         if [ ! -f "$(pwd)/QuantumROM/Mods/Apps/MTK_Camera_Files_Android_${ANDROID_VERSION}.zip" ]; then
             if curl -fsSL --connect-timeout 5 https://www.google.com >/dev/null; then
-                wget -q --no-check-certificate\
+                if ! wget --no-check-certificate \
                     "https://github.com/SN-Abdullah-Al-Noman/Samsung_Special/releases/download/Android_${ANDROID_VERSION}/MTK_Camera_Files_Android_${ANDROID_VERSION}.zip" \
-                    -O "$(pwd)/QuantumROM/Mods/Apps/MTK_Camera_Files_Android_${ANDROID_VERSION}.zip"
+                    -O "$(pwd)/QuantumROM/Mods/Apps/MTK_Camera_Files_Android_${ANDROID_VERSION}.zip"; then
+                    echo "Unable to download MTK_Camera_Files_Android_${ANDROID_VERSION}.zip. Skipping adding camera files."
+                    return 0
+				fi
             else
                 echo "No internet connection available. Unable to download MTK_Camera_Files_Android_${ANDROID_VERSION}.zip."
-                return 1
+                return 0
             fi
         fi
 
@@ -1815,76 +1908,6 @@ FIX_CAMERA() {
             cp -rfa "$(pwd)/QuantumROM/Mods/Apps/MTK_Camera_Files_Android_${ANDROID_VERSION}/system/." "${EXTRACTED_FIRM_DIR}/system/system"
         fi
     fi
-}
-
-
-DOWNLOAD_GITHUB_FOLDER() {
-    local URL="$1"
-    local OUT="${2:-}"
-
-    if [ -z "$URL" ]; then
-        echo "Usage: DOWNLOAD_GITHUB_FOLDER <GitHub_Folder_URL>"
-        return 1
-    fi
-
-    local REPO BRANCH FOLDER
-
-    read -r REPO BRANCH FOLDER <<< "$(
-        printf '%s\n' "$URL" |
-        sed -E 's#https://github\.com/([^/]+/[^/]+)/tree/([^/]+)/?(.*)#\1 \2 \3#'
-    )"
-
-    if [ -z "$REPO" ] || [ -z "$BRANCH" ]; then
-        echo "Invalid GitHub folder URL!"
-        return 1
-    fi
-
-    FOLDER="${FOLDER#/}"
-    FOLDER="${FOLDER%/}"
-
-    [ -z "$OUT" ] && OUT="${FOLDER##*/}"
-    [ -z "$OUT" ] && OUT="${REPO##*/}"
-
-    local API
-    API="https://api.github.com/repos/$REPO/contents/$FOLDER?ref=$BRANCH"
-
-    rm -rf "$OUT"
-    mkdir -p "$OUT"
-
-    curl -fsSL \
-        -H "Accept: application/vnd.github+json" \
-        -H "X-GitHub-Api-Version: 2022-11-28" \
-        "$API" |
-    jq -c '.[]' |
-    while read -r ITEM; do
-
-        local NAME TYPE DOWNLOAD_URL DIR_URL
-
-        NAME="$(jq -r '.name' <<< "$ITEM")"
-        TYPE="$(jq -r '.type' <<< "$ITEM")"
-
-        if [ "$TYPE" = "file" ]; then
-
-            DOWNLOAD_URL="$(jq -r '.download_url' <<< "$ITEM")"
-
-            printf "- Downloading: %-35s ... " "$NAME"
-
-            curl -fsSL \
-                "$DOWNLOAD_URL" \
-                -o "$OUT/$NAME" && echo "100%" || {
-                    echo "- FAILED"
-                    continue
-                }
-
-        elif [ "$TYPE" = "dir" ]; then
-
-            DIR_URL="$(jq -r '.html_url' <<< "$ITEM")"
-
-            DOWNLOAD_GITHUB_FOLDER \
-                "$DIR_URL" \
-                "$OUT/$NAME"
-        fi
-    done
 }
 
 
@@ -1926,7 +1949,7 @@ APPLY_STOCK_CONFIG() {
 
 	if [ -z "$STOCK_DEVICE" ] || [ "$STOCK_DEVICE" = "None" ]; then
         echo -e "- No target device is set. Just modifying ROM without any device config."
-        return 1
+        return 0
     fi
 
     if [ ! -f "${DEVICES_DIR}/$STOCK_DEVICE/config" ]; then
@@ -1964,7 +1987,7 @@ APPLY_STOCK_CONFIG() {
         echo "CPU ABI MISMATCH!"
         echo "STOCK DEVICE CPU ABI: $STOCK_DEVICE_CPU_ABILIST"
         echo "TARGET ROM CPU ABI: $TARGET_ROM_CPU_ABILIST"
-        exit 1
+        # exit 1
     fi
 
     # Remove ESIM files if stock device does not support.
@@ -2055,7 +2078,7 @@ BUILD_PROP() {
 
     if [ ! -f "$FILE" ]; then
         echo -e "- File not found: $FILE"
-        return 1
+        return 0
     fi
 
     if grep -q "^${KEY}=" "$FILE"; then
@@ -2151,7 +2174,7 @@ APPLY_JDM_SPECIAL() {
                 -O "$(pwd)/QuantumROM/Mods/Apps/JDM_Camera_Files_Android_${ANDROID_VERSION}.zip"
         else
             echo "- No internet connection available. Unable to download: Samsung_OCRDataProvider_Android_${ANDROID_VERSION}.zip"
-            return 1
+            return 0
         fi
     fi
 
@@ -2201,7 +2224,7 @@ ADD_CHINA_SMART_MANAGER() {
         local TARGET_ROM_FLOATING_FEATURE="${EXTRACTED_FIRM_DIR}/vendor/etc/floating_feature.xml"
     else
         echo "- Error: floating_feature.xml not found!"
-        return 1
+        return 0
     fi
 
     # ================= SMART MANAGER =================
@@ -2214,7 +2237,7 @@ ADD_CHINA_SMART_MANAGER() {
                 -O "$(pwd)/QuantumROM/Mods/Apps/Samsung_SmartManagerCN_Android_${ANDROID_VERSION}.zip"
         else
             echo "- No internet connection available. Unable to download: Samsung_SmartManagerCN_Android_${ANDROID_VERSION}.zip"
-            return 1
+            return 0
         fi
     fi
 
@@ -2267,7 +2290,7 @@ ADD_SAMSUNG_FLAGSHIP_APPS() {
 
 	if [[ ! "$ANDROID_VERSION" =~ ^(14|15|16)$ ]]; then
         echo "- Unsupported Android version: $ANDROID_VERSION"
-        return 1
+        return 0
     fi
 
 	if [ -f "${EXTRACTED_FIRM_DIR}/system/system/etc/floating_feature.xml" ]; then
@@ -2291,7 +2314,7 @@ ADD_SAMSUNG_FLAGSHIP_APPS() {
                 -O "$(pwd)/QuantumROM/Mods/Apps/Samsung_PhotoEditor_AIFull_Android_${ANDROID_VERSION}.zip"
         else
             echo "- No internet connection available. Unable to download: Samsung_PhotoEditor_AIFull_Android_${ANDROID_VERSION}.zip"
-            return 1
+            return 0
         fi
     fi
 
@@ -2344,7 +2367,7 @@ ADD_SAMSUNG_FLAGSHIP_APPS() {
                 -O "$(pwd)/QuantumROM/Mods/Apps/Samsung_OCRDataProvider_Android_${ANDROID_VERSION}.zip"
         else
             echo "- No internet connection available. Unable to download: Samsung_OCRDataProvider_Android_${ANDROID_VERSION}.zip"
-            return 1
+            return 0
         fi
     fi
 
@@ -2376,7 +2399,7 @@ ADD_SAMSUNG_FLAGSHIP_APPS() {
                -O "$(pwd)/QuantumROM/Mods/Apps/Samsung_Important_Apps_Android_${ANDROID_VERSION}.zip"
         else
             echo "No internet connection available. Unable to download: Samsung_Important_Apps_Android_${ANDROID_VERSION}.zip"
-            return 1
+            return 0
         fi
     fi
 
